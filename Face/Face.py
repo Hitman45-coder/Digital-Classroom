@@ -1,5 +1,6 @@
 import os
 import cv2
+import sys
 import re
 import numpy as np
 from datetime import datetime
@@ -7,9 +8,24 @@ from openpyxl import Workbook, load_workbook
 from insightface.app import FaceAnalysis
 from collections import defaultdict
 
+os.environ["INSIGHTFACE_HOME"] = os.path.join(sys._MEIPASS if hasattr(sys, "_MEIPASS") else ".", "insightface", "models")
 
-app = FaceAnalysis(name='buffalo_l')  # You can use 'antelopev2' if needed
-app.prepare(ctx_id=0, det_size=(640, 640))  # ctx_id=0 for GPU, -1 for CPU
+
+from insightface.app import FaceAnalysis
+
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and PyInstaller"""
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+model_path = resource_path("insightface/models")
+
+app = FaceAnalysis(allowed_modules=['detection', 'recognition'], root=model_path)
+app.prepare(ctx_id=0, det_size=(640, 640))
+
 
 # Load known faces and their embeddings
 known_face_encodings = defaultdict(list)
@@ -55,7 +71,7 @@ print("Press 'q' to quit")
 
 while True:
     ret, frame = cap.read()
-    
+    frame = cv2.flip(frame,0)
     if not ret:
         break
     #frame = cv2.flip(frame,0)
@@ -76,7 +92,7 @@ while True:
                 best_distance = min_dist
                 best_match = name
 
-        threshold = 0.78  # You can tune this
+        threshold = 0.9  # You can tune this
         name = best_match if best_distance < threshold else "Unknown"
 
         # Draw box and name
@@ -93,7 +109,7 @@ while True:
             print(f"[INFO] Marked present: {name}")
 
     
-    cv2.imshow("InsightFace Attendance",frame )
+    cv2.imshow("InsightFace Attendance",frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break

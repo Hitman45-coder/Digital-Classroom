@@ -1,0 +1,25 @@
+# VS & build system
+.vs/
+*.suo
+*.user
+*.db
+*.db-shm
+*.db-wal
+
+# PyInstaller build folders
+build/
+dist/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Excel & local data files
+*.xlsx
+
+# Model and embeddings
+insightface/models/
+
+# Known faces (optional)
+known_faces/
