@@ -27,6 +27,9 @@ load_dotenv()  # Loads variables from .env file
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
+ip_url = "http://192.168.137.69:4747/video" # realme
+ip_url1 = "http://192.168.137.128:4747/video" #mi
+
 # PyInstaller path fix
 def resource_path(relative_path):
     try:
@@ -74,23 +77,27 @@ class VideoThread(QThread):
     frame_data = Signal(int, QImage)
     attendance_updated = Signal(str)  # Signal to update GUI attendance dynamically
 
-    def __init__(self, camera_id, parent=None):
+    def __init__(self, camera_id, url, parent=None):
         super().__init__(parent)
         self.running = False
-        self.camera_id = camera_id
+        self.camera_id = camera_id  # Use for signal emission, e.g., 0 or 1
+        self.url = url  # Store the URL for video capture
 
     def run(self):
         self.running = True
-        cap = cv2.VideoCapture(self.camera_id, cv2.CAP_DSHOW)  # Use DSHOW for USB devices
+        cap = cv2.VideoCapture(self.url)  # Directly use the URL for IP stream
         if not cap.isOpened():
-            print(f"Failed to open camera {self.camera_id}")
+            print(f"Failed to open camera stream: {self.url}")
             return
+        
+        print(f"Successfully opened stream: {self.url}")  # Debug message
         already_marked = set()
 
         while self.running:
             ret, frame = cap.read()
             if not ret:
-                break
+                print(f"Error reading frame from {self.url}, retrying...")
+                continue  # Try to recover by continuing the loop
 
             faces = face_recognition.get(frame)
 
@@ -107,7 +114,7 @@ class VideoThread(QThread):
                         best_distance = min_dist
                         best_match = name
 
-                threshold = 1
+                threshold = 1.0  # Adjusted threshold for better matching
                 name = best_match if best_distance < threshold else "Unknown"
                 x1, y1, x2, y2 = map(int, face.bbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (125, 100, 0), 2)
@@ -128,6 +135,7 @@ class VideoThread(QThread):
 
         cap.release()
         wb.save(excel_filename)
+        print(f"Stopped stream: {self.url}")  # Debug message
 
     def stop(self):
         self.running = False
@@ -215,40 +223,27 @@ class MainApp(QDialog):
             scaled_pixmap = pixmap.scaled(max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             label.setPixmap(scaled_pixmap)
 
-    def detect_connected_cameras(self, max_cams=2):
-        available_cams = []
-        for i in range(max_cams):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # Use DSHOW for better USB support
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    available_cams.append(i)
-            cap.release()
-        print(f"Detected cameras: {available_cams}")  # Debug print
-        return available_cams
+   
 
     def start_attendance(self):
+        # Stop if already running
         if self.camera_threads:
-            return  # Already running
-
-        cameras = self.detect_connected_cameras()
-        
-        if not cameras:
-            QMessageBox.warning(self, "No Cameras", "No cameras detected")
             return
 
-        # Clear existing widgets in the video_layout
+        # Clear existing labels
         for i in reversed(range(self.video_layout.count())):
             widget = self.video_layout.itemAt(i).widget()
             if widget:
                 self.video_layout.removeWidget(widget)
                 widget.deleteLater()
+
         self.camera_views.clear()
         self.camera_threads.clear()
 
-        # Handle layout based on number of cameras
-        for idx, cam_id in enumerate(cameras):
-            thread = VideoThread(cam_id, self)  # Pass self as parent
+        # Start two cameras with URLs
+        urls = [(0, ip_url), (1, ip_url1)]  # (camera_id, url)
+        for cam_id, url in urls:
+            thread = VideoThread(cam_id, url, self)
             thread.frame_data.connect(self.update_frame)
             thread.attendance_updated.connect(self.on_attendance_updated)
             self.camera_threads[cam_id] = thread
@@ -256,19 +251,14 @@ class MainApp(QDialog):
             label = QLabel()
             label.setStyleSheet("border: 1px solid gray;")
             label.setAlignment(Qt.AlignCenter)
-            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)  # Use Preferred to limit growth
-            if len(cameras) == 1:
-                # Single camera: fill the entire video_widget
-                self.video_layout.addWidget(label)
-            else:
-                # Two cameras: split vertically into two horizontal tabs
-                self.video_layout.addWidget(label, stretch=1)  # Equal height
-
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self.video_layout.addWidget(label)
             self.camera_views[cam_id] = label
-            self._adjust_label_size(label)  # Set initial maximum size
+            self._adjust_label_size(label)
             thread.start()
 
         self.update_today_present_list()
+
 
     def stop_attendance(self):
         for thread in self.camera_threads.values():
@@ -447,6 +437,7 @@ class MainApp(QDialog):
         email_file = "emails.json"
         if os.path.exists(email_file):
             with open(email_file, "r") as f:
+
                 try:
                     data = json.load(f)
                 except json.JSONDecodeError:
@@ -472,6 +463,7 @@ class MainApp(QDialog):
             emails = {}
         SMTP_SERVER = 'smtp.gmail.com'
         SMTP_PORT = 587
+        
         try:
             server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
             server.starttls()
