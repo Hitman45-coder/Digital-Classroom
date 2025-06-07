@@ -329,6 +329,11 @@ class MainApp(QDialog):
         os.makedirs(folder_path, exist_ok=True)
 
         if method == "Capture from Webcam":
+            
+            # Release the camera from VideoThread before using to capture photo
+            if self.camera_threads:
+                self.stop_attendance()
+                QMessageBox.information(self, "Info", "Video feed stopped to capture face. Restart it after saving.")
             cap = cv2.VideoCapture(0)
             if not cap.isOpened():
                 QMessageBox.warning(self, "Error", "Webcam not accessible.")
