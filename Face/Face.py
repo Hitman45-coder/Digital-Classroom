@@ -22,15 +22,15 @@ from email.message import EmailMessage
 import json
 from dotenv import load_dotenv
 
-load_dotenv()  # Loads variables from .env file
+load_dotenv()  # Loads the variable for Sever 
 
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
-ip_url = "http://192.168.137.69:4747/video" # realme
-ip_url1 = "http://192.168.137.128:4747/video" #mi
+ip_url = "http://192.168.137.69:4747/video" 
+ip_url1 = "http://192.168.137.253:4747/video"
 
-# PyInstaller path fix
+# Manage path
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -41,12 +41,12 @@ def resource_path(relative_path):
 model_path = resource_path("insightface/models")
 os.environ["INSIGHTFACE_HOME"] = model_path
 
-# Initialize InsightFace
+# Initialize & pass model path 
 os.environ["INSIGHTFACE_DOWNLOAD_PROGRESS"] = "False"
 face_recognition = FaceAnalysis(allowed_modules=['detection', 'recognition'], root=model_path)
 face_recognition.prepare(ctx_id=-1, det_size=(640, 640))  # Set ctx_id to 0 for GPU
 
-# Load known face encodings
+# Load existing(load) face encodings
 known_face_encodings = defaultdict(list)
 known_faces_dir = 'known_faces'
 os.makedirs(known_faces_dir, exist_ok=True)
@@ -64,6 +64,7 @@ for person_name in os.listdir(known_faces_dir):
                 embedding = embedding / np.linalg.norm(embedding)
                 known_face_encodings[person_name].append(embedding)
 
+# Create .xlsx file to save attendance
 excel_filename = 'attendance.xlsx'
 try:
     wb = load_workbook(excel_filename)
@@ -74,72 +75,93 @@ except FileNotFoundError:
     ws.append(["Name", "Date", "Time"])
 
 class VideoThread(QThread):
-    frame_data = Signal(int, QImage)
-    attendance_updated = Signal(str)  # Signal to update GUI attendance dynamically
+    frame_data = Signal(int, QImage) # Emit id, Image
+    attendance_updated = Signal(str, str, str)  # Emit name, date, and time
 
     def __init__(self, camera_id, url, parent=None):
         super().__init__(parent)
         self.running = False
-        self.camera_id = camera_id  # Use for signal emission, e.g., 0 or 1
-        self.url = url  # Store the URL for video capture
+        self.paused = False
+        self.camera_id = camera_id
+        self.url = url
+        self.frame = None
+        self.frame_lock = threading.Lock()
 
+    # Recognize face & mark attendance
     def run(self):
         self.running = True
-        cap = cv2.VideoCapture(self.url)  # Directly use the URL for IP stream
+        cap = cv2.VideoCapture(self.url)
         if not cap.isOpened():
             print(f"Failed to open camera stream: {self.url}")
             return
         
-        print(f"Successfully opened stream: {self.url}")  # Debug message
+        print(f"Successfully opened stream: {self.url}")
         already_marked = set()
 
         while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                print(f"Error reading frame from {self.url}, retrying...")
-                continue  # Try to recover by continuing the loop
+            if not self.paused:
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"Error reading frame from {self.url}, retrying...")
+                    continue
 
-            faces = face_recognition.get(frame)
+                faces = face_recognition.get(frame)
+                if faces:
+                    for face in faces:
+                        embedding = face.embedding
+                        embedding = embedding / np.linalg.norm(embedding)
+                        best_match = "Unknown"
+                        best_distance = float('inf')
 
-            for face in faces:
-                embedding = face.embedding
-                embedding = embedding / np.linalg.norm(embedding)
-                best_match = "Unknown"
-                best_distance = float('inf')
+                        for name, embeddings in known_face_encodings.items():
+                            distances = np.linalg.norm(np.array(embeddings) - embedding, axis=1)
+                            min_dist = np.min(distances)
+                            if min_dist < best_distance:
+                                best_distance = min_dist
+                                best_match = name
 
-                for name, embeddings in known_face_encodings.items():
-                    distances = np.linalg.norm(np.array(embeddings) - embedding, axis=1)
-                    min_dist = np.min(distances)
-                    if min_dist < best_distance:
-                        best_distance = min_dist
-                        best_match = name
+                        threshold = 1.0
+                        name = best_match if best_distance < threshold else "Unknown"
+                        x1, y1, x2, y2 = map(int, face.bbox)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (125, 100, 0), 2)
+                        cv2.putText(frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                        if name != "Unknown" and name not in already_marked:
+                            now = datetime.now()
+                            date_str = now.strftime("%Y-%m-%d")
+                            time_str = now.strftime("%H:%M:%S")
+                            # Check for duplicates in the Excel file for today
+                            has_duplicate = any(row[0] == name and row[1] == date_str for row in ws.iter_rows(min_row=2, values_only=True))
+                            if not has_duplicate:
+                                ws.append([name, date_str, time_str])
+                                wb.save(excel_filename) 
+                                already_marked.add(name)
+                                self.attendance_updated.emit(name, date_str, time_str)
 
-                threshold = 1.0  # Adjusted threshold for better matching
-                name = best_match if best_distance < threshold else "Unknown"
-                x1, y1, x2, y2 = map(int, face.bbox)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (125, 100, 0), 2)
-                cv2.putText(frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.9, (255, 255, 255), 2)
-
-                if name != "Unknown" and name not in already_marked:
-                    now = datetime.now()
-                    ws.append([name, now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")])
-                    already_marked.add(name)
-                    self.attendance_updated.emit(name)
-
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            self.frame_data.emit(self.camera_id, qt_image)
+                with self.frame_lock:
+                    self.frame = frame
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.frame_data.emit(self.camera_id, qt_image)
 
         cap.release()
-        wb.save(excel_filename)
-        print(f"Stopped stream: {self.url}")  # Debug message
+        wb.save(excel_filename)  # Save when thread stops
+        print(f"Stopped stream: {self.url}")
 
     def stop(self):
         self.running = False
         self.wait()
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def get_latest_frame(self):
+        with self.frame_lock:
+            return self.frame.copy() if self.frame is not None else None
 
 class MainApp(QDialog):
     def __init__(self):
@@ -150,19 +172,22 @@ class MainApp(QDialog):
         self.ui = Ui_Start_2()
         self.ui.setupUi(self)
 
-        # Apply a main layout to the dialog
+        # Verify UI elements
+        if not hasattr(self.ui, 'Start_Button') or not hasattr(self.ui, 'Stop_Button') or \
+           not hasattr(self.ui, 'Mail_Button') or not hasattr(self.ui, 'Add_Button') or \
+           not hasattr(self.ui, 'Remove_Button') or not hasattr(self.ui, 'Attendance') or \
+           not hasattr(self.ui, 'video_container'):
+            raise AttributeError("One or more UI elements are missing in Ui_Start_2. Check ui_main_window.py or the .ui file.")
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(main_layout)
 
-        # Wrap video area in a widget with a vertical layout for multiple feeds
-        self.video_widget = QWidget()
+        self.video_widget = self.ui.video_container  
         self.video_layout = QVBoxLayout(self.video_widget)
         self.video_layout.setContentsMargins(0, 0, 0, 0)
-        self.video_layout.setSpacing(0)  # No spacing between feeds
-        main_layout.addWidget(self.video_widget, stretch=2)
+        self.video_layout.setSpacing(0)
 
-        # Group buttons and Attendance into a widget with a vertical layout
         button_panel = QWidget()
         button_layout = QVBoxLayout(button_panel)
         button_layout.addWidget(self.ui.Start_Button)
@@ -170,67 +195,64 @@ class MainApp(QDialog):
         button_layout.addWidget(self.ui.Mail_Button)
         button_layout.addWidget(self.ui.Add_Button)
         button_layout.addWidget(self.ui.Remove_Button)
-        button_layout.addWidget(self.ui.Attendance)
-        button_layout.addStretch()  # Push buttons to the top
+        button_layout.addWidget(self.ui.Attendance, stretch=1)  
+        button_layout.addStretch()
         button_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(button_panel, stretch=1)
+        main_layout.addWidget(self.video_widget)
+        main_layout.addWidget(button_panel)
 
-        # Initialize present_today
-        self.present_today = set()
+        self.present_today = {}
 
-        # Configure QTableWidget
-        self.ui.Attendance.setColumnCount(1)
-        self.ui.Attendance.setHorizontalHeaderLabels(["Present Today"])
-        self.ui.Attendance.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.ui.Attendance.setColumnCount(3)
+        self.ui.Attendance.setHorizontalHeaderLabels(["Name", "Date", "Time"])
+        self.ui.Attendance.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.ui.Attendance.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.ui.Attendance.setMinimumHeight(200)  
 
-        self.camera_threads = {}  # Camera_id: VideoThread
-        self.camera_views = {}   # camera_id: QLabel
+        self.camera_threads = {}
+        self.camera_views = {}
 
-        # Connect buttons
+        # Explicit signal-slot connections
         self.ui.Start_Button.clicked.connect(self.start_attendance)
         self.ui.Stop_Button.clicked.connect(self.stop_attendance)
         self.ui.Add_Button.clicked.connect(self.add_face)
         self.ui.Remove_Button.clicked.connect(self.remove_face)
         self.ui.Mail_Button.clicked.connect(self.send_absentee_emails)
 
-        # Initialize the attendance list
         self.update_today_present_list()
 
     def resizeEvent(self, event):
-        """Handle window resize to adjust video feed sizes."""
         super().resizeEvent(event)
         for cam_id, label in self.camera_views.items():
             self._adjust_label_size(label)
 
     def _adjust_label_size(self, label):
-        """Adjust label size based on parent widget and number of cameras."""
         if not self.video_widget or not self.video_layout.count():
             return
-        total_height = self.video_widget.height()
-        if len(self.camera_views) == 1:
-            label.setMaximumSize(self.video_widget.width(), total_height)
-        else:
-            label.setMaximumSize(self.video_widget.width(), total_height // len(self.camera_views))
+        available_width = self.video_widget.width()
+        available_height = self.video_widget.height() // len(self.camera_views)
+        label.setMaximumSize(available_width, available_height)
+        label.setMinimumSize(available_width, available_height)
 
     @Slot(int, QImage)
     def update_frame(self, cam_id, image):
         pixmap = QPixmap.fromImage(image)
         if cam_id in self.camera_views:
             label = self.camera_views[cam_id]
-            # Scale pixmap to fit the label's maximum allowed size while maintaining aspect ratio
-            max_size = label.maximumSize()
-            scaled_pixmap = pixmap.scaled(max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             label.setPixmap(scaled_pixmap)
 
-   
+    @Slot(str, str, str)
+    def on_attendance_updated(self, name, date_str, time_str):
+        if name not in self.present_today:
+            self.present_today[name] = (date_str, time_str)
+            self.update_today_present_list()
+            wb.save(excel_filename)  # Save workbook after update
 
     def start_attendance(self):
-        # Stop if already running
         if self.camera_threads:
             return
 
-        # Clear existing labels
         for i in reversed(range(self.video_layout.count())):
             widget = self.video_layout.itemAt(i).widget()
             if widget:
@@ -240,8 +262,7 @@ class MainApp(QDialog):
         self.camera_views.clear()
         self.camera_threads.clear()
 
-        # Start two cameras with URLs
-        urls = [(0, ip_url), (1, ip_url1)]  # (camera_id, url)
+        urls = [(0, ip_url), (1, ip_url1)]
         for cam_id, url in urls:
             thread = VideoThread(cam_id, url, self)
             thread.frame_data.connect(self.update_frame)
@@ -251,14 +272,13 @@ class MainApp(QDialog):
             label = QLabel()
             label.setStyleSheet("border: 1px solid gray;")
             label.setAlignment(Qt.AlignCenter)
-            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.video_layout.addWidget(label)
             self.camera_views[cam_id] = label
             self._adjust_label_size(label)
             thread.start()
 
         self.update_today_present_list()
-
 
     def stop_attendance(self):
         for thread in self.camera_threads.values():
@@ -272,31 +292,35 @@ class MainApp(QDialog):
 
         self.update_today_present_list()
 
-    @Slot(str)
-    def on_attendance_updated(self, name):
-        if name not in self.present_today:
-            self.present_today.add(name)
-            self.update_today_present_list()
-
     def update_today_present_list(self):
         today = datetime.now().strftime("%Y-%m-%d")
         self.present_today.clear()
 
         for row in ws.iter_rows(min_row=2, values_only=True):
-            name, date_str, _ = row
-            if date_str == today and name not in self.present_today:
-                self.present_today.add(name)
+            name, date_str, time_str = row
+            if date_str == today:
+                self.present_today[name] = (date_str, time_str)
 
         self.ui.Attendance.setRowCount(len(self.present_today))
-        for row, name in enumerate(sorted(self.present_today)):
-            item = QTableWidgetItem(name)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            self.ui.Attendance.setItem(row, 0, item)
+        row = 0
+        for name, (date_str, time_str) in sorted(self.present_today.items()):
+            item_name = QTableWidgetItem(name)
+            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+            self.ui.Attendance.setItem(row, 0, item_name)
+
+            item_date = QTableWidgetItem(date_str)
+            item_date.setFlags(item_date.flags() & ~Qt.ItemIsEditable)
+            self.ui.Attendance.setItem(row, 1, item_date)
+
+            item_time = QTableWidgetItem(time_str)
+            item_time.setFlags(item_time.flags() & ~Qt.ItemIsEditable)
+            self.ui.Attendance.setItem(row, 2, item_time)
+            row += 1
 
     def add_face(self):
         method, ok = QInputDialog.getItem(
             self, "Select Method", "Add face by:",
-            ["Capture from Webcam", "Upload from Disk"],
+            ["Capture from Phone Camera", "Upload from Disk"],
             0, False
         )
         if not ok:
@@ -318,63 +342,120 @@ class MainApp(QDialog):
         folder_path = os.path.join("known_faces", name)
         os.makedirs(folder_path, exist_ok=True)
 
-        if method == "Capture from Webcam":
-            
-            # Release the camera from VideoThread before using to capture photo
-            if self.camera_threads:
-                self.stop_attendance()
-                QMessageBox.information(self, "Info", "Video feed stopped to capture face. Restart it after saving.")
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                QMessageBox.warning(self, "Error", "Webcam not accessible.")
+        if method == "Capture from Phone Camera":
+            if not self.camera_threads:
+                QMessageBox.warning(self, "Error", "No camera feeds are running. Start attendance first.")
                 return
 
-            QMessageBox.information(self, "Instruction", "Press 's' to capture, 'q' to cancel.")
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                cv2.imshow("Capture Face - Press 's' to save", frame)
-                key = cv2.waitKey(1)
-                if key == ord('s'):
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    break
-                elif key == ord('q'):
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    return
+            cam_options = {0: "Camera 1 (Realme)", 1: "Camera 2 (Mi)"}
+            cam_id, ok = QInputDialog.getItem(self, "Select Camera", "Choose camera to capture face:",
+                                            list(cam_options.values()), 0, False)
+            if not ok:
+                return
+            selected_cam_id = [k for k, v in cam_options.items() if v == cam_id][0]
+
+            other_cam_id = 1 - selected_cam_id
+            if other_cam_id in self.camera_threads:
+                self.camera_threads[other_cam_id].pause()
+
+            capture_dialog = QDialog(self)
+            capture_dialog.setWindowTitle(f"Capture Face from {cam_options[selected_cam_id]}")
+            layout = QVBoxLayout(capture_dialog)
+            capture_label = QLabel()
+            capture_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(capture_label)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+            buttons.accepted.connect(capture_dialog.accept)
+            buttons.rejected.connect(capture_dialog.reject)
+
+            def update_capture_frame():
+                frame = self.camera_threads[selected_cam_id].get_latest_frame()
+                if frame is not None:
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_frame.shape
+                    bytes_per_line = ch * w
+                    qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qt_image).scaled(640, 480, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    capture_label.setPixmap(pixmap)
+
+            timer = self.startTimer(100)
+            def timer_event():
+                update_capture_frame()
+
+            capture_dialog.timer_event = timer_event
+            capture_dialog.timer_id = timer
+
+            if capture_dialog.exec() == QDialog.Accepted:
+                frame = self.camera_threads[selected_cam_id].get_latest_frame()
+                if frame is not None:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    height, width, _ = frame_rgb.shape
+                    bytes_per_line = 3 * width
+                    preview_img = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                    preview_dialog = QDialog(self)
+                    preview_dialog.setWindowTitle("Confirm Photo")
+                    preview_layout = QVBoxLayout(preview_dialog)
+                    preview_label = QLabel()
+                    preview_label.setPixmap(QPixmap.fromImage(preview_img).scaled(400, 400, Qt.KeepAspectRatio))
+                    preview_layout.addWidget(preview_label)
+                    preview_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+                    preview_layout.addWidget(preview_buttons)
+                    preview_buttons.accepted.connect(preview_dialog.accept)
+                    preview_buttons.rejected.connect(preview_dialog.reject)
+
+                    if preview_dialog.exec() == QDialog.Accepted:
+                        count = len([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                        save_path = os.path.join(folder_path, f"{count + 1}.jpg")
+                        cv2.imwrite(save_path, frame)
+                        QMessageBox.information(self, "Success", f"Image saved to {save_path}")
+                        self.refresh_known_encodings()
+                    else:
+                        QMessageBox.information(self, "Cancelled", "Face not saved.")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to capture image.")
+            else:
+                QMessageBox.information(self, "Cancelled", "Face capture cancelled.")
+
+            if other_cam_id in self.camera_threads:
+                self.camera_threads[other_cam_id].resume()
+            self.killTimer(capture_dialog.timer_id)
         else:
             file_path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.jpg *.jpeg)")
             if not file_path:
                 return
             frame = cv2.imread(file_path)
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, _ = frame_rgb.shape
-        bytes_per_line = 3 * width
-        preview_img = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, _ = frame_rgb.shape
+            bytes_per_line = 3 * width
+            preview_img = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Confirm Photo")
-        layout = QVBoxLayout(dialog)
-        label = QLabel()
-        label.setPixmap(QPixmap.fromImage(preview_img).scaled(400, 400, Qt.KeepAspectRatio))
-        layout.addWidget(label)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(buttons)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Confirm Photo")
+            layout = QVBoxLayout(dialog)
+            label = QLabel()
+            label.setPixmap(QPixmap.fromImage(preview_img).scaled(400, 400, Qt.KeepAspectRatio))
+            layout.addWidget(label)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
 
-        if dialog.exec() == QDialog.Accepted:
-            count = len([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-            save_path = os.path.join(folder_path, f"{count + 1}.jpg")
-            cv2.imwrite(save_path, frame)
-            QMessageBox.information(self, "Success", f"Image saved to {save_path}")
+            if dialog.exec() == QDialog.Accepted:
+                count = len([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                save_path = os.path.join(folder_path, f"{count + 1}.jpg")
+                cv2.imwrite(save_path, frame)
+                QMessageBox.information(self, "Success", f"Image saved to {save_path}")
+                self.refresh_known_encodings()
+            else:
+                QMessageBox.information(self, "Cancelled", "Face not saved.")
             self.refresh_known_encodings()
-        else:
-            QMessageBox.information(self, "Cancelled", "Face not saved.")
-        self.refresh_known_encodings()
+
+    def timerEvent(self, event):
+        if hasattr(self.sender(), 'timer_event'):
+            self.sender().timer_event()
 
     def remove_face(self):
         name, ok = QInputDialog.getText(self, "Remove Face", "Enter person's name to delete:")
@@ -411,12 +492,7 @@ class MainApp(QDialog):
 
     def get_absentees_today(self):
         all_people = set(os.listdir("known_faces"))
-        present_today = set()
-        today = datetime.now().strftime("%Y-%m-%d")
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            name, date_str, _ = row
-            if date_str == today:
-                present_today.add(name)
+        present_today = set(self.present_today.keys())  
         return list(all_people - present_today)
 
     def save_email(self, name, email):
@@ -437,7 +513,6 @@ class MainApp(QDialog):
         email_file = "emails.json"
         if os.path.exists(email_file):
             with open(email_file, "r") as f:
-
                 try:
                     data = json.load(f)
                 except json.JSONDecodeError:
