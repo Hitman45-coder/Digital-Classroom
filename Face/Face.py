@@ -11,7 +11,7 @@ import threading
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QLabel, QDialogButtonBox, 
     QVBoxLayout, QInputDialog, QMessageBox, QTableWidgetItem, QHeaderView, QHBoxLayout, QSizePolicy,
-    QWidget
+    QWidget, QLineEdit, QFormLayout,QPushButton
 )
 from PySide6.QtCore import Qt, Signal, QThread, Slot, QRect
 from PySide6.QtGui import QImage, QPixmap, QFont
@@ -22,15 +22,18 @@ from email.message import EmailMessage
 import json
 from dotenv import load_dotenv
 
-load_dotenv()  # Loads the variable for Sever 
+load_dotenv()  # Loads the variable for Server
 
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
-ip_url = "http://192.168.137.69:4747/video" 
-ip_url1 = "http://192.168.137.253:4747/video"
+# Default URLs (used if not configured)
+DEFAULT_URLS = [
+    "http://192.168.137.69:4747/video",  # Default Realme
+    "http://192.168.137.31:4747/video"   # Default Mi
+]
 
-# Manage path
+# PyInstaller path fix
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -41,12 +44,12 @@ def resource_path(relative_path):
 model_path = resource_path("insightface/models")
 os.environ["INSIGHTFACE_HOME"] = model_path
 
-# Initialize & pass model path 
+# Initialize InsightFace
 os.environ["INSIGHTFACE_DOWNLOAD_PROGRESS"] = "False"
 face_recognition = FaceAnalysis(allowed_modules=['detection', 'recognition'], root=model_path)
 face_recognition.prepare(ctx_id=-1, det_size=(640, 640))  # Set ctx_id to 0 for GPU
 
-# Load existing(load) face encodings
+# Load known face encodings
 known_face_encodings = defaultdict(list)
 known_faces_dir = 'known_faces'
 os.makedirs(known_faces_dir, exist_ok=True)
@@ -64,7 +67,6 @@ for person_name in os.listdir(known_faces_dir):
                 embedding = embedding / np.linalg.norm(embedding)
                 known_face_encodings[person_name].append(embedding)
 
-# Create .xlsx file to save attendance
 excel_filename = 'attendance.xlsx'
 try:
     wb = load_workbook(excel_filename)
@@ -75,7 +77,7 @@ except FileNotFoundError:
     ws.append(["Name", "Date", "Time"])
 
 class VideoThread(QThread):
-    frame_data = Signal(int, QImage) # Emit id, Image
+    frame_data = Signal(int, QImage)
     attendance_updated = Signal(str, str, str)  # Emit name, date, and time
 
     def __init__(self, camera_id, url, parent=None):
@@ -87,7 +89,6 @@ class VideoThread(QThread):
         self.frame = None
         self.frame_lock = threading.Lock()
 
-    # Recognize face & mark attendance
     def run(self):
         self.running = True
         cap = cv2.VideoCapture(self.url)
@@ -133,7 +134,7 @@ class VideoThread(QThread):
                             has_duplicate = any(row[0] == name and row[1] == date_str for row in ws.iter_rows(min_row=2, values_only=True))
                             if not has_duplicate:
                                 ws.append([name, date_str, time_str])
-                                wb.save(excel_filename) 
+                                wb.save(excel_filename)  # Save immediately
                                 already_marked.add(name)
                                 self.attendance_updated.emit(name, date_str, time_str)
 
@@ -163,6 +164,30 @@ class VideoThread(QThread):
         with self.frame_lock:
             return self.frame.copy() if self.frame is not None else None
 
+class CameraConfigDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configure Cameras")
+        self.setModal(True)
+
+        layout = QFormLayout(self)
+
+        self.url1_edit = QLineEdit(self)
+        self.url1_edit.setText(DEFAULT_URLS[0])
+        layout.addRow("Camera 1 URL (Realme):", self.url1_edit)
+
+        self.url2_edit = QLineEdit(self)
+        self.url2_edit.setText(DEFAULT_URLS[1])
+        layout.addRow("Camera 2 URL (Mi):", self.url2_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_urls(self):
+        return [self.url1_edit.text(), self.url2_edit.text()]
+
 class MainApp(QDialog):
     def __init__(self):
         super().__init__()
@@ -183,31 +208,35 @@ class MainApp(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(main_layout)
 
-        self.video_widget = self.ui.video_container  
+        self.video_widget = self.ui.video_container  # Use the existing video_container
         self.video_layout = QVBoxLayout(self.video_widget)
         self.video_layout.setContentsMargins(0, 0, 0, 0)
         self.video_layout.setSpacing(0)
 
         button_panel = QWidget()
         button_layout = QVBoxLayout(button_panel)
+        self.config_button = QPushButton("Configure Cameras")
+        self.config_button.clicked.connect(self.configure_cameras)
         button_layout.addWidget(self.ui.Start_Button)
         button_layout.addWidget(self.ui.Stop_Button)
         button_layout.addWidget(self.ui.Mail_Button)
         button_layout.addWidget(self.ui.Add_Button)
         button_layout.addWidget(self.ui.Remove_Button)
-        button_layout.addWidget(self.ui.Attendance, stretch=1)  
+        button_layout.addWidget(self.config_button)
+        button_layout.addWidget(self.ui.Attendance, stretch=1)  # Stretch Attendance to bottom
         button_layout.addStretch()
         button_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(self.video_widget)
         main_layout.addWidget(button_panel)
 
         self.present_today = {}
+        self.camera_urls = DEFAULT_URLS  # Store dynamic URLs
 
         self.ui.Attendance.setColumnCount(3)
         self.ui.Attendance.setHorizontalHeaderLabels(["Name", "Date", "Time"])
         self.ui.Attendance.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.ui.Attendance.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.ui.Attendance.setMinimumHeight(200)  
+        self.ui.Attendance.setMinimumHeight(200)  # Minimum height to ensure visibility
 
         self.camera_threads = {}
         self.camera_views = {}
@@ -249,6 +278,16 @@ class MainApp(QDialog):
             self.update_today_present_list()
             wb.save(excel_filename)  # Save workbook after update
 
+    def configure_cameras(self):
+        dialog = CameraConfigDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            urls = dialog.get_urls()
+            if all(url.strip() for url in urls):
+                self.camera_urls = urls
+                QMessageBox.information(self, "Success", "Camera URLs configured successfully.")
+            else:
+                QMessageBox.warning(self, "Error", "Please enter valid URLs for both cameras.")
+
     def start_attendance(self):
         if self.camera_threads:
             return
@@ -262,7 +301,7 @@ class MainApp(QDialog):
         self.camera_views.clear()
         self.camera_threads.clear()
 
-        urls = [(0, ip_url), (1, ip_url1)]
+        urls = [(0, self.camera_urls[0]), (1, self.camera_urls[1])]
         for cam_id, url in urls:
             thread = VideoThread(cam_id, url, self)
             thread.frame_data.connect(self.update_frame)
@@ -492,7 +531,7 @@ class MainApp(QDialog):
 
     def get_absentees_today(self):
         all_people = set(os.listdir("known_faces"))
-        present_today = set(self.present_today.keys())  
+        present_today = set(self.present_today.keys())  # Use current day's attendance
         return list(all_people - present_today)
 
     def save_email(self, name, email):
